@@ -156,7 +156,7 @@ class Tool(Type):
 
     def format_as_litellm_function_call(self):
         description = self.desc or ""
-        
+
         # Include output schema information in description if available
         if self.output_schema is not None:
             schema_summary = self._format_output_schema_summary(self.output_schema)
@@ -166,7 +166,7 @@ class Tool(Type):
                     f"Output Schema: This tool returns structured data with the following schema:\n"
                     f"{schema_summary}"
                 ).strip()
-        
+
         return {
             "type": "function",
             "function": {
@@ -179,54 +179,121 @@ class Tool(Type):
                 },
             },
         }
-    
-    def _format_output_schema_summary(self, schema: dict[str, Any]) -> str:
+
+    def _format_output_schema_summary(
+        self, schema: dict[str, Any], indent: int = 0, defs: dict[str, Any] | None = None, max_depth: int = 5
+    ) -> str:
         """Format output schema as a human-readable summary for LLM description.
-        
+
         Args:
             schema: JSON schema dictionary describing the output structure.
-            
+            indent: Current indentation level for nested structures.
+            defs: Dictionary of schema definitions ($defs) for resolving $ref references.
+            max_depth: Maximum recursion depth to prevent infinite loops.
+
         Returns:
             A formatted string summarizing the schema properties.
         """
+        # Check recursion depth to prevent infinite loops
+        if indent >= max_depth:
+            return ""
+
         # Extract key information from the schema
         schema_type = schema.get("type", "object")
         properties = schema.get("properties", {})
         required = schema.get("required", [])
-        
-        # Handle $defs references if present
-        defs = schema.get("$defs", {})
-        
+
+        # Extract $defs at top level and pass through recursion
+        if defs is None:
+            defs = schema.get("$defs", {})
+
         if not properties:
+            # Handle case where schema itself is a $ref
+            if "$ref" in schema:
+                ref_path = schema["$ref"].split("/")[-1]
+                if ref_path in defs:
+                    return self._format_output_schema_summary(defs[ref_path], indent, defs, max_depth)
             return f"Type: {schema_type}"
-        
+
         summary_parts = []
+        indent_str = "  " * indent
+
         for prop_name, prop_info in properties.items():
             # Resolve $ref references if present
             if isinstance(prop_info, dict) and "$ref" in prop_info:
                 ref_path = prop_info["$ref"].split("/")[-1]
                 if ref_path in defs:
                     prop_info = defs[ref_path]
-            
-            # Handle array items with $ref
-            if isinstance(prop_info, dict) and "items" in prop_info:
-                items = prop_info["items"]
-                if isinstance(items, dict) and "$ref" in items:
-                    ref_path = items["$ref"].split("/")[-1]
-                    if ref_path in defs:
-                        prop_info = {**prop_info, "items": defs[ref_path]}
-            
+
             prop_type = prop_info.get("type", "unknown")
             prop_desc = prop_info.get("description", "")
             is_required = prop_name in required
-            
-            part = f"  - {prop_name} ({prop_type})"
-            if prop_desc:
-                part += f": {prop_desc}"
-            if is_required:
-                part += " [required]"
-            summary_parts.append(part)
-        
+
+            # Handle array types with nested structures
+            if prop_type == "array" and isinstance(prop_info, dict) and "items" in prop_info:
+                items = prop_info["items"]
+
+                # Resolve $ref in items if present
+                if isinstance(items, dict) and "$ref" in items:
+                    ref_path = items["$ref"].split("/")[-1]
+                    if ref_path in defs:
+                        items = defs[ref_path]
+
+                # Check if items are objects (Pydantic models) that should be expanded
+                if isinstance(items, dict) and items.get("type") == "object" and "properties" in items:
+                    # Format as array of objects with nested fields
+                    part = f"{indent_str}  - {prop_name} (array of objects)"
+                    if prop_desc:
+                        part += f": {prop_desc}"
+                    if is_required:
+                        part += " [required]"
+                    summary_parts.append(part)
+
+                    # Recursively format the nested object structure
+                    nested_summary = self._format_output_schema_summary(items, indent + 1, defs, max_depth)
+                    if nested_summary:
+                        # Add indentation to each line of the nested summary
+                        nested_lines = nested_summary.split("\n")
+                        for line in nested_lines:
+                            if line.strip():  # Skip empty lines
+                                summary_parts.append(line)
+                else:
+                    # Simple array type (primitives or unresolved references)
+                    items_type = items.get("type", "unknown") if isinstance(items, dict) else "unknown"
+                    part = f"{indent_str}  - {prop_name} (array of {items_type})"
+                    if prop_desc:
+                        part += f": {prop_desc}"
+                    if is_required:
+                        part += " [required]"
+                    summary_parts.append(part)
+
+            # Handle object types (nested Pydantic models or direct object properties)
+            elif prop_type == "object" and isinstance(prop_info, dict) and "properties" in prop_info:
+                part = f"{indent_str}  - {prop_name} (object)"
+                if prop_desc:
+                    part += f": {prop_desc}"
+                if is_required:
+                    part += " [required]"
+                summary_parts.append(part)
+
+                # Recursively format the nested object structure
+                nested_summary = self._format_output_schema_summary(prop_info, indent + 1, defs, max_depth)
+                if nested_summary:
+                    # Add indentation to each line of the nested summary
+                    nested_lines = nested_summary.split("\n")
+                    for line in nested_lines:
+                        if line.strip():  # Skip empty lines
+                            summary_parts.append(line)
+
+            # Handle simple types
+            else:
+                part = f"{indent_str}  - {prop_name} ({prop_type})"
+                if prop_desc:
+                    part += f": {prop_desc}"
+                if is_required:
+                    part += " [required]"
+                summary_parts.append(part)
+
         return "\n".join(summary_parts)
 
     def _run_async_in_sync(self, coroutine):
@@ -384,7 +451,9 @@ class ToolCalls(Type):
                         break
 
             if func is None:
-                raise ValueError(f"Tool function '{self.name}' not found. Please pass the tool functions to the `execute` method.")
+                raise ValueError(
+                    f"Tool function '{self.name}' not found. Please pass the tool functions to the `execute` method."
+                )
 
             try:
                 args = self.args or {}
