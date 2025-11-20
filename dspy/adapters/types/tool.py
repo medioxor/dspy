@@ -225,9 +225,28 @@ class Tool(Type):
                 if ref_path in defs:
                     prop_info = defs[ref_path]
 
-            prop_type = prop_info.get("type", "unknown")
             prop_desc = prop_info.get("description", "")
             is_required = prop_name in required
+
+            # Handle anyOf/oneOf (union types like str | None)
+            if isinstance(prop_info, dict) and ("anyOf" in prop_info or "oneOf" in prop_info):
+                union_key = "anyOf" if "anyOf" in prop_info else "oneOf"
+                union_types = []
+                for union_item in prop_info[union_key]:
+                    if isinstance(union_item, dict):
+                        item_type = union_item.get("type", "unknown")
+                        union_types.append(item_type)
+                prop_type = " | ".join(union_types) if union_types else "unknown"
+
+                part = f"{indent_str}  - {prop_name} ({prop_type})"
+                if prop_desc:
+                    part += f": {prop_desc}"
+                if is_required:
+                    part += " [required]"
+                summary_parts.append(part)
+                continue
+
+            prop_type = prop_info.get("type", "unknown")
 
             # Handle array types with nested structures
             if prop_type == "array" and isinstance(prop_info, dict) and "items" in prop_info:
