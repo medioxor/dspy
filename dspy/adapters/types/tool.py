@@ -320,7 +320,17 @@ class Tool(Type):
     def __str__(self):
         desc = f", whose description is <desc>{self.desc}</desc>.".replace("\n", "  ") if self.desc else "."
         arg_desc = f"It takes arguments {self.args}."
-        return f"{self.name}{desc} {arg_desc}"
+
+        # Include output schema information if available
+        output_schema_desc = ""
+        if self.output_schema is not None:
+            schema_summary = self._format_output_schema_summary(self.output_schema)
+            if schema_summary:
+                # Format schema summary for text representation (replace newlines with spaces for compactness)
+                schema_text = schema_summary.replace("\n", " ").strip()
+                output_schema_desc = f" Returns structured data with schema: {schema_text}."
+
+        return f"{self.name}{desc} {arg_desc}{output_schema_desc}"
 
 
 class ToolCalls(Type):
