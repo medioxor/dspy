@@ -31,6 +31,7 @@ class Tool(Type):
     arg_types: dict[str, Any] | None = None
     arg_desc: dict[str, str] | None = None
     has_kwargs: bool = False
+    output_schema: dict[str, Any] | None = None
 
     def __init__(
         self,
@@ -40,6 +41,7 @@ class Tool(Type):
         args: dict[str, Any] | None = None,
         arg_types: dict[str, Any] | None = None,
         arg_desc: dict[str, str] | None = None,
+        output_schema: dict[str, Any] | None = None,
     ):
         """Initialize the Tool class.
 
@@ -57,6 +59,9 @@ class Tool(Type):
                 from arg name to the type of the argument. Defaults to None.
             arg_desc (Optional[dict[str, str]], optional): Descriptions for each arg, represented as a
                 dictionary from arg name to description string. Defaults to None.
+            output_schema (Optional[dict[str, Any]], optional): JSON schema describing the structured output
+                format of the tool. If provided, this will be included in the tool description when formatting
+                for LLMs. Defaults to None.
 
         Example:
 
@@ -70,6 +75,7 @@ class Tool(Type):
         ```
         """
         super().__init__(func=func, name=name, desc=desc, args=args, arg_types=arg_types, arg_desc=arg_desc)
+        self.output_schema = output_schema
         self._parse_function(func, arg_desc)
 
     def _parse_function(self, func: Callable, arg_desc: dict[str, str] | None = None):
@@ -149,11 +155,23 @@ class Tool(Type):
         return str(self)
 
     def format_as_litellm_function_call(self):
+        description = self.desc or ""
+        
+        # Include output schema information in description if available
+        if self.output_schema is not None:
+            schema_summary = self._format_output_schema_summary(self.output_schema)
+            if schema_summary:
+                description = (
+                    f"{description}\n\n"
+                    f"Output Schema: This tool returns structured data with the following schema:\n"
+                    f"{schema_summary}"
+                ).strip()
+        
         return {
             "type": "function",
             "function": {
                 "name": self.name,
-                "description": self.desc,
+                "description": description,
                 "parameters": {
                     "type": "object",
                     "properties": self.args,
@@ -161,6 +179,55 @@ class Tool(Type):
                 },
             },
         }
+    
+    def _format_output_schema_summary(self, schema: dict[str, Any]) -> str:
+        """Format output schema as a human-readable summary for LLM description.
+        
+        Args:
+            schema: JSON schema dictionary describing the output structure.
+            
+        Returns:
+            A formatted string summarizing the schema properties.
+        """
+        # Extract key information from the schema
+        schema_type = schema.get("type", "object")
+        properties = schema.get("properties", {})
+        required = schema.get("required", [])
+        
+        # Handle $defs references if present
+        defs = schema.get("$defs", {})
+        
+        if not properties:
+            return f"Type: {schema_type}"
+        
+        summary_parts = []
+        for prop_name, prop_info in properties.items():
+            # Resolve $ref references if present
+            if isinstance(prop_info, dict) and "$ref" in prop_info:
+                ref_path = prop_info["$ref"].split("/")[-1]
+                if ref_path in defs:
+                    prop_info = defs[ref_path]
+            
+            # Handle array items with $ref
+            if isinstance(prop_info, dict) and "items" in prop_info:
+                items = prop_info["items"]
+                if isinstance(items, dict) and "$ref" in items:
+                    ref_path = items["$ref"].split("/")[-1]
+                    if ref_path in defs:
+                        prop_info = {**prop_info, "items": defs[ref_path]}
+            
+            prop_type = prop_info.get("type", "unknown")
+            prop_desc = prop_info.get("description", "")
+            is_required = prop_name in required
+            
+            part = f"  - {prop_name} ({prop_type})"
+            if prop_desc:
+                part += f": {prop_desc}"
+            if is_required:
+                part += " [required]"
+            summary_parts.append(part)
+        
+        return "\n".join(summary_parts)
 
     def _run_async_in_sync(self, coroutine):
         try:
