@@ -180,6 +180,53 @@ class Tool(Type):
             },
         }
 
+    def _merge_ref_with_definition(
+        self, ref_dict: dict[str, Any], defs: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Merge a $ref property with its referenced definition, preserving property-level metadata.
+        
+        According to JSON Schema spec, when a property has both $ref and other properties
+        (like description), those properties should be preserved/merged with the referenced definition.
+        Property-level metadata takes precedence over definition metadata.
+        
+        Args:
+            ref_dict: Dictionary containing $ref and potentially other properties (description, title, etc.)
+            defs: Dictionary of schema definitions ($defs) for resolving $ref references.
+            
+        Returns:
+            Merged dictionary with property-level metadata preserved, or original dict if $ref not found.
+        """
+        if not isinstance(ref_dict, dict) or "$ref" not in ref_dict:
+            return ref_dict
+            
+        ref_path = ref_dict["$ref"].split("/")[-1]
+        if ref_path not in defs:
+            # If definition not found, return original (without $ref to avoid issues)
+            result = ref_dict.copy()
+            result.pop("$ref", None)
+            return result
+            
+        # Get the referenced definition (make a copy to avoid mutating original)
+        definition = defs[ref_path].copy() if isinstance(defs[ref_path], dict) else defs[ref_path]
+        
+        # If definition is not a dict, can't merge - return original
+        if not isinstance(definition, dict):
+            result = ref_dict.copy()
+            result.pop("$ref", None)
+            return result
+        
+        # Merge: start with definition, then overlay property-level metadata
+        # Property-level description/title/etc. take precedence
+        merged = definition.copy()
+        
+        # Preserve property-level metadata (description, title, etc.) over definition
+        for key, value in ref_dict.items():
+            if key != "$ref" and value is not None:
+                # Property-level values take precedence, especially description
+                merged[key] = value
+                
+        return merged
+
     def _format_output_schema_summary(
         self, schema: dict[str, Any], indent: int = 0, defs: dict[str, Any] | None = None, max_depth: int = 5
     ) -> str:
@@ -219,11 +266,9 @@ class Tool(Type):
         indent_str = "  " * indent
 
         for prop_name, prop_info in properties.items():
-            # Resolve $ref references if present
+            # Resolve $ref references if present, preserving property-level metadata
             if isinstance(prop_info, dict) and "$ref" in prop_info:
-                ref_path = prop_info["$ref"].split("/")[-1]
-                if ref_path in defs:
-                    prop_info = defs[ref_path]
+                prop_info = self._merge_ref_with_definition(prop_info, defs)
 
             prop_desc = prop_info.get("description", "")
             is_required = prop_name in required
@@ -252,11 +297,9 @@ class Tool(Type):
             if prop_type == "array" and isinstance(prop_info, dict) and "items" in prop_info:
                 items = prop_info["items"]
 
-                # Resolve $ref in items if present
+                # Resolve $ref in items if present, preserving item-level metadata
                 if isinstance(items, dict) and "$ref" in items:
-                    ref_path = items["$ref"].split("/")[-1]
-                    if ref_path in defs:
-                        items = defs[ref_path]
+                    items = self._merge_ref_with_definition(items, defs)
 
                 # Check if items are objects (Pydantic models) that should be expanded
                 if isinstance(items, dict) and items.get("type") == "object" and "properties" in items:
